@@ -5,6 +5,7 @@ import { stkPush, stkCallback } from "./src/mpesa.js";
 import { sendSms } from "./src/sms.js";
 
 dotenv.config();
+
 const app = express();
 app.use(bodyParser.json());
 
@@ -18,10 +19,14 @@ app.post("/sms/test", async (req, res) => {
   res.json({ status: "SMS sent (sandbox)" });
 });
 
-// --- Home ---
-app.get("/", (_, res) => res.send("✅ ADASTE M-PESA + SMS API is running on Render."));
+// --- Home / Health check ---
+app.get("/", (_, res) => {
+  res.send("✅ ADASTE M-PESA + SMS API is running on Render.");
+});
 
-const PORT = process.env.PORT || 3000;
+// --- Start the server ---
+const PORT = process.env.PORT || 10000; // Render-friendly port
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server is live on port ${PORT}`);
+  console.log(`✅ ADASTE Server is live on Render at port ${PORT}`);
+  console.log(`🌐 Health Check URL: http://localhost:${PORT}/`);
 });
