@@ -79,7 +79,13 @@ app.get("/api/clients", (_, res) => {
   res.json(clients);
 });
 
-// 🟢 6. Root endpoint
+// 🟢 6. Get all loans
+app.get("/api/loans", (_, res) => {
+  const loans = readData(loansFile);
+  res.json(loans);
+});
+
+// 🟢 7. Root endpoint
 app.get("/", (_, res) => res.send("✅ ADASTE Loan System API is live!"));
 
 // Start server
