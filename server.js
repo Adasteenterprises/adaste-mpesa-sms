@@ -1,92 +1,95 @@
 // server.js
 import express from "express";
+import mongoose from "mongoose";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import fs from "fs";
 
 dotenv.config();
 const app = express();
 app.use(bodyParser.json());
 
-// Local JSON files for quick data storage
-const clientsFile = "./data/clients.json";
-const loansFile = "./data/loans.json";
+// 🟢 Connect to MongoDB
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ Connected to MongoDB Atlas"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-// Ensure folders exist
-if (!fs.existsSync("./data")) fs.mkdirSync("./data");
-if (!fs.existsSync(clientsFile)) fs.writeFileSync(clientsFile, "[]");
-if (!fs.existsSync(loansFile)) fs.writeFileSync(loansFile, "[]");
+// 🟢 Define Schemas
+const clientSchema = new mongoose.Schema({
+  name: String,
+  phone: String,
+  email: String,
+});
 
-// Helper functions
-const readData = (file) => JSON.parse(fs.readFileSync(file));
-const writeData = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2));
+const loanSchema = new mongoose.Schema({
+  clientId: String,
+  amount: Number,
+  term: String,
+  purpose: String,
+  status: { type: String, default: "Pending" },
+});
 
-// 🟢 1. Register client
-app.post("/api/register", (req, res) => {
+const Client = mongoose.model("Client", clientSchema);
+const Loan = mongoose.model("Loan", loanSchema);
+
+// 🟢 Register client
+app.post("/api/register", async (req, res) => {
   const { name, phone, email } = req.body;
   if (!name || !phone || !email)
     return res.status(400).json({ error: "All fields required" });
 
-  const clients = readData(clientsFile);
-  const id = `C${clients.length + 1}`;
-  const newClient = { id, name, phone, email };
-  clients.push(newClient);
-  writeData(clientsFile, clients);
+  const newClient = new Client({ name, phone, email });
+  await newClient.save();
   res.json({ message: "Client registered successfully", client: newClient });
 });
 
-// 🟢 2. Apply for a loan
-app.post("/api/loans/apply", (req, res) => {
+// 🟢 Apply for a loan
+app.post("/api/loans/apply", async (req, res) => {
   const { clientId, amount, term, purpose } = req.body;
   if (!clientId || !amount)
     return res.status(400).json({ error: "Missing fields" });
 
-  const loans = readData(loansFile);
-  const id = `L${loans.length + 1}`;
-  const newLoan = { id, clientId, amount, term, purpose, status: "Pending" };
-  loans.push(newLoan);
-  writeData(loansFile, loans);
+  const newLoan = new Loan({ clientId, amount, term, purpose });
+  await newLoan.save();
   res.json({ message: "Loan application submitted.", loan: newLoan });
 });
 
-// 🟢 3. Approve Loan
-app.post("/api/loans/approve/:id", (req, res) => {
+// 🟢 Approve loan
+app.post("/api/loans/approve/:id", async (req, res) => {
   const { id } = req.params;
-  const loans = readData(loansFile);
-  const loan = loans.find((l) => l.id === id);
+  const loan = await Loan.findById(id);
   if (!loan) return res.status(404).json({ error: "Loan not found" });
 
   loan.status = "Approved";
-  writeData(loansFile, loans);
+  await loan.save();
   res.json({ message: "Loan approved successfully.", loan });
 });
 
-// 🟢 4. Reject Loan
-app.post("/api/loans/reject/:id", (req, res) => {
+// 🟢 Reject loan
+app.post("/api/loans/reject/:id", async (req, res) => {
   const { id } = req.params;
-  const loans = readData(loansFile);
-  const loan = loans.find((l) => l.id === id);
+  const loan = await Loan.findById(id);
   if (!loan) return res.status(404).json({ error: "Loan not found" });
 
   loan.status = "Rejected";
-  writeData(loansFile, loans);
+  await loan.save();
   res.json({ message: "Loan rejected successfully.", loan });
 });
 
-// 🟢 5. Get all clients
-app.get("/api/clients", (_, res) => {
-  const clients = readData(clientsFile);
+// 🟢 Get all clients
+app.get("/api/clients", async (_, res) => {
+  const clients = await Client.find();
   res.json(clients);
 });
 
-// 🟢 6. Get all loans
-app.get("/api/loans", (_, res) => {
-  const loans = readData(loansFile);
+// 🟢 Get all loans
+app.get("/api/loans", async (_, res) => {
+  const loans = await Loan.find();
   res.json(loans);
 });
 
-// 🟢 7. Root endpoint
-app.get("/", (_, res) => res.send("✅ ADASTE Loan System API is live!"));
+// 🟢 Root endpoint
+app.get("/", (_, res) => res.send("✅ ADASTE Loan System API (MongoDB version) is live!"));
 
 // Start server
 const PORT = process.env.PORT || 10000;
