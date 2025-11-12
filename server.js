@@ -1,32 +1,29 @@
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import { stkPush, stkCallback } from "./src/mpesa.js";
-import { sendSms } from "./src/sms.js";
+import cors from "cors";
+import { approveLoan, rejectLoan, applyLoan } from "./src/loans.js";
+import { registerClient, getClients } from "./src/clients.js";
 
 dotenv.config();
-
 const app = express();
 app.use(bodyParser.json());
+app.use(cors());
 
-// --- M-PESA endpoints ---
-app.post("/mpesa/stkpush", stkPush);
-app.post("/mpesa/stk/callback", stkCallback);
+// --- Client Routes ---
+app.post("/api/register", registerClient);
+app.get("/api/clients", getClients);
 
-// --- Test SMS ---
-app.post("/sms/test", async (req, res) => {
-  await sendSms(req.body.phone, req.body.message);
-  res.json({ status: "SMS sent (sandbox)" });
-});
+// --- Loan Routes ---
+app.post("/api/loans/apply", applyLoan);
+app.post("/api/loans/approve/:id", approveLoan);
+app.post("/api/loans/reject/:id", rejectLoan);
 
-// --- Home / Health check ---
-app.get("/", (_, res) => {
-  res.send("✅ ADASTE M-PESA + SMS API is running on Render.");
-});
+// --- Root ---
+app.get("/", (_, res) => res.send("✅ ADASTE Loan System API is live!"));
 
-// --- Start the server ---
-const PORT = process.env.PORT || 10000; // Render-friendly port
+// --- Server Start ---
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ ADASTE Server is live on Render at port ${PORT}`);
-  console.log(`🌐 Health Check URL: http://localhost:${PORT}/`);
+  console.log(`✅ Server is live on port ${PORT}`);
 });
