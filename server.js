@@ -1,139 +1,280 @@
+// server.js
 import express from "express";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
 import cors from "cors";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
-dotenv.config(); // ✅ Load environment variables
+dotenv.config();
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
-// ✅ Use MongoDB URI from Render Environment Variable or fallback for local testing
-const mongoURI =
-  process.env.MONGODB_URI ||
-  "mongodb+srv://adasteenterprises_db_user:RW3WGl4ovSrjqZ7y@adastecluster.zt7jspz.mongodb.net/adaste_db?retryWrites=true&w=majority";
+const DATA_DIR = path.join(process.cwd(), "data");
+const USERS_FILE = path.join(DATA_DIR, "users.json"); // users: admins, officers, clients, investors
+const LOANS_FILE = path.join(DATA_DIR, "loans.json");
 
-// ✅ Connect to MongoDB
-mongoose
-  .connect(mongoURI)
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, "[]", "utf8");
+if (!fs.existsSync(LOANS_FILE)) fs.writeFileSync(LOANS_FILE, "[]", "utf8");
 
-// ------------------- Schemas -------------------
-const clientSchema = new mongoose.Schema({
-  id: String,
-  name: String,
-  phone: String,
-  email: String,
-});
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
+const ADMIN_BOOTSTRAP_KEY = process.env.ADMIN_BOOTSTRAP_KEY || "bootstrap_change_me";
 
-const loanSchema = new mongoose.Schema({
-  id: String,
-  clientId: String,
-  amount: Number,
-  term: String,
-  purpose: String,
-  status: String,
-});
+const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+const writeJson = (p, d) => fs.writeFileSync(p, JSON.stringify(d, null, 2), "utf8");
 
-const Client = mongoose.model("Client", clientSchema);
-const Loan = mongoose.model("Loan", loanSchema);
+function generateId(prefix, arr) {
+  return `${prefix}${arr.length + 1}`;
+}
 
-// ------------------- Routes -------------------
+function findUserByEmail(email) {
+  const users = readJson(USERS_FILE);
+  return users.find((u) => u.email && u.email.toLowerCase() === email.toLowerCase());
+}
 
-// ✅ Register client
-app.post("/api/register", async (req, res) => {
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
+  const token = auth.slice(7);
   try {
-    const { name, phone, email } = req.body;
-    const count = await Client.countDocuments();
-    const client = new Client({
-      id: `C${count + 1}`,
-      name,
-      phone,
-      email,
-    });
-    await client.save();
-    res.json({ message: "Client registered successfully", client });
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload; // { id, role }
+    next();
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(401).json({ error: "Invalid token" });
   }
-});
+}
 
-// ✅ Apply for loan
-app.post("/api/loans/apply", async (req, res) => {
-  try {
-    const { clientId, amount, term, purpose } = req.body;
-    const count = await Loan.countDocuments();
-    const loan = new Loan({
-      id: `L${count + 1}`,
-      clientId,
-      amount,
-      term,
-      purpose,
-      status: "Pending",
-    });
-    await loan.save();
-    res.json({ message: "Loan application submitted.", loan });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+function roleRequired(roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+    if (!roles.includes(req.user.role)) return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
+}
+
+// ---------- Bootstrap first admin (one-time) ----------
+app.post("/api/bootstrap-admin", (req, res) => {
+  const { name, email, password, key } = req.body;
+  if (!name || !email || !password || !key) return res.status(400).json({ error: "Missing fields" });
+  if (key !== ADMIN_BOOTSTRAP_KEY) return res.status(403).json({ error: "Invalid bootstrap key" });
+
+  const users = readJson(USERS_FILE);
+  if (users.some((u) => u.role === "admin")) {
+    return res.status(400).json({ error: "Admin already exists. Bootstrap is one-time." });
   }
+
+  const hashed = bcrypt.hashSync(password, 10);
+  const admin = {
+    id: generateId("A", users.filter(u=>u.role==="admin"||u.role==="A").concat([])),
+    name,
+    email,
+    password: hashed,
+    role: "admin",
+    createdAt: new Date().toISOString(),
+  };
+  users.push(admin);
+  writeJson(USERS_FILE, users);
+  return res.json({ message: "Admin created", admin: { id: admin.id, name: admin.name, email: admin.email } });
 });
 
-// ✅ Approve loan
-app.post("/api/loans/approve/:id", async (req, res) => {
-  try {
-    const loan = await Loan.findOneAndUpdate(
-      { id: req.params.id },
-      { status: "Approved" },
-      { new: true }
-    );
-    res.json({ message: "Loan approved successfully.", loan });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+// ---------- Auth: login ----------
+app.post("/api/auth/login", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Missing fields" });
+
+  const user = findUserByEmail(email);
+  if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+  if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: "Invalid credentials" });
+
+  const token = jwt.sign({ id: user.id, role: user.role, name: user.name, email: user.email }, JWT_SECRET, {
+    expiresIn: "30d",
+  });
+
+  // hide password
+  const safeUser = { ...user };
+  delete safeUser.password;
+
+  res.json({ token, user: safeUser });
+});
+
+// ---------- Admin endpoints (requires admin) ----------
+app.post("/api/admin/create-officer", authMiddleware, roleRequired(["admin"]), (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
+
+  const users = readJson(USERS_FILE);
+  if (findUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
+
+  const hashed = bcrypt.hashSync(password, 10);
+  const officer = { id: generateId("O", users.filter(u=>u.role==="officer")), name, email, password: hashed, role: "officer", createdAt: new Date().toISOString() };
+
+  users.push(officer);
+  writeJson(USERS_FILE, users);
+  res.json({ message: "Officer created", officer: { id: officer.id, name: officer.name, email: officer.email } });
+});
+
+app.post("/api/admin/create-investor", authMiddleware, roleRequired(["admin"]), (req, res) => {
+  const { name, email, password, investments } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
+
+  const users = readJson(USERS_FILE);
+  if (findUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
+
+  const hashed = bcrypt.hashSync(password, 10);
+  const investor = { id: generateId("I", users.filter(u=>u.role==="investor")), name, email, password: hashed, role: "investor", investments: investments || [], createdAt: new Date().toISOString() };
+
+  users.push(investor);
+  writeJson(USERS_FILE, users);
+  res.json({ message: "Investor created", investor: { id: investor.id, name: investor.name, email: investor.email } });
+});
+
+// Admin can also create clients if needed
+app.post("/api/admin/create-client", authMiddleware, roleRequired(["admin"]), (req, res) => {
+  const { name, email, phone, password } = req.body;
+  if (!name || !email || !phone || !password) return res.status(400).json({ error: "Missing fields" });
+
+  const users = readJson(USERS_FILE);
+  if (findUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
+
+  const hashed = bcrypt.hashSync(password, 10);
+  const client = { id: generateId("C", users.filter(u=>u.role==="client")), name, email, phone, password: hashed, role: "client", loanBalance: 0, createdAt: new Date().toISOString() };
+
+  users.push(client);
+  writeJson(USERS_FILE, users);
+  res.json({ message: "Client created", client: { id: client.id, name: client.name, email: client.email, phone: client.phone } });
+});
+
+// ---------- Officer endpoints (create client) ----------
+app.post("/api/officer/create-client", authMiddleware, roleRequired(["officer","admin"]), (req, res) => {
+  const { name, email, phone, initialPassword } = req.body;
+  if (!name || !email || !phone || !initialPassword) return res.status(400).json({ error: "Missing fields" });
+
+  const users = readJson(USERS_FILE);
+  if (findUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
+
+  const hashed = bcrypt.hashSync(initialPassword, 10);
+  const client = { id: generateId("C", users.filter(u=>u.role==="client")), name, email, phone, password: hashed, role: "client", loanBalance: 0, createdAt: new Date().toISOString() };
+
+  users.push(client);
+  writeJson(USERS_FILE, users);
+  res.json({ message: "Client created", client: { id: client.id, name: client.name, email: client.email, phone: client.phone } });
+});
+
+// ---------- Client endpoints ----------
+app.post("/api/client/change-password", authMiddleware, roleRequired(["client"]), (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  if (!oldPassword || !newPassword) return res.status(400).json({ error: "Missing fields" });
+
+  const users = readJson(USERS_FILE);
+  const idx = users.findIndex((u) => u.id === req.user.id && u.role === "client");
+  if (idx === -1) return res.status(404).json({ error: "Client not found" });
+
+  const user = users[idx];
+  if (!bcrypt.compareSync(oldPassword, user.password)) return res.status(401).json({ error: "Old password incorrect" });
+
+  users[idx].password = bcrypt.hashSync(newPassword, 10);
+  writeJson(USERS_FILE, users);
+  res.json({ message: "Password changed successfully" });
+});
+
+// ---------- Loan endpoints ----------
+app.post("/api/loans/apply", authMiddleware, roleRequired(["client"]), (req, res) => {
+  const { amount, term, purpose } = req.body;
+  if (!amount || !term) return res.status(400).json({ error: "Missing fields" });
+
+  const loans = readJson(LOANS_FILE);
+  const loan = {
+    id: generateId("L", loans),
+    clientId: req.user.id,
+    amount,
+    term,
+    purpose: purpose || "",
+    status: "Pending",
+    createdAt: new Date().toISOString(),
+  };
+  loans.push(loan);
+  writeJson(LOANS_FILE, loans);
+  res.json({ message: "Loan application submitted", loan });
+});
+
+// Approve / Reject by admin (director)
+app.post("/api/loans/approve/:id", authMiddleware, roleRequired(["admin"]), (req, res) => {
+  const loans = readJson(LOANS_FILE);
+  const loan = loans.find((l) => l.id === req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  loan.status = "Approved";
+  loan.approvedAt = new Date().toISOString();
+  writeJson(LOANS_FILE, loans);
+  res.json({ message: "Loan approved", loan });
+});
+
+app.post("/api/loans/reject/:id", authMiddleware, roleRequired(["admin"]), (req, res) => {
+  const loans = readJson(LOANS_FILE);
+  const loan = loans.find((l) => l.id === req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  loan.status = "Rejected";
+  loan.rejectedAt = new Date().toISOString();
+  loan.rejectionReason = req.body.reason || null;
+  writeJson(LOANS_FILE, loans);
+  res.json({ message: "Loan rejected", loan });
+});
+
+// ---------- Read endpoints (role-based) ----------
+app.get("/api/clients", authMiddleware, roleRequired(["admin","officer"]), (req, res) => {
+  const users = readJson(USERS_FILE);
+  const clients = users.filter((u) => u.role === "client").map(u => ({ id: u.id, name: u.name, email: u.email, phone: u.phone, createdAt: u.createdAt }));
+  res.json(clients);
+});
+
+app.get("/api/loans", authMiddleware, (req, res) => {
+  const loans = readJson(LOANS_FILE);
+  if (req.user.role === "client") {
+    return res.json(loans.filter(l => l.clientId === req.user.id));
   }
-});
-
-// ✅ Reject loan
-app.post("/api/loans/reject/:id", async (req, res) => {
-  try {
-    const loan = await Loan.findOneAndUpdate(
-      { id: req.params.id },
-      { status: "Rejected" },
-      { new: true }
-    );
-    res.json({ message: "Loan rejected successfully.", loan });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (req.user.role === "investor") {
+    // investors see loans? show none by default, they will see investments endpoint
+    return res.json([]);
   }
+  // admin/officer see all loans
+  res.json(loans);
 });
 
-// ✅ Get all clients
-app.get("/api/clients", async (req, res) => {
-  try {
-    const clients = await Client.find();
-    res.json(clients);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+app.get("/api/investors", authMiddleware, (req, res) => {
+  const users = readJson(USERS_FILE);
+  if (req.user.role === "admin") {
+    const investors = users.filter((u) => u.role === "investor").map(u => ({ id:u.id, name:u.name, email:u.email, investments: u.investments||[] }));
+    return res.json(investors);
   }
-});
-
-// ✅ Get all loans
-app.get("/api/loans", async (req, res) => {
-  try {
-    const loans = await Loan.find();
-    res.json(loans);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (req.user.role === "investor") {
+    const inv = users.find(u => u.id === req.user.id);
+    if (!inv) return res.status(404).json({ error: "Investor not found" });
+    const safe = { id: inv.id, name: inv.name, email: inv.email, investments: inv.investments || [] };
+    return res.json(safe);
   }
+  return res.status(403).json({ error: "Forbidden" });
 });
 
-// ✅ Root route
-app.get("/", (req, res) => {
-  res.send("🚀 Adaste MPESA SMS API running successfully!");
+// ---------- Utility: whoami ----------
+app.get("/api/me", authMiddleware, (req, res) => {
+  const users = readJson(USERS_FILE);
+  const user = users.find(u => u.id === req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  const copy = { ...user };
+  delete copy.password;
+  res.json(copy);
 });
 
-// ------------------- Server -------------------
+// ---------- Root ----------
+app.get("/", (req, res) => res.send("✅ ADASTE JSON backend is running"));
+
+// Start
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
+app.listen(PORT, "0.0.0.0", () => console.log(`✅ Server running on port ${PORT}`));
